@@ -2,7 +2,7 @@
 
 面向个人自用的本地网页应用，可查询配置的 Uniswap V3 / PancakeSwap V3 Position Manager 中的 NFT 仓位。不会连接钱包、索要助记词或私钥，也不会提交交易。
 
-## 启动（Windows）
+## 启 动（Windows）
 
 1. 安装 Node.js LTS（如果电脑还没有）。
 2. 双击 `start.bat`，首次会安装依赖。
