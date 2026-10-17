@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createPublicClient, http, formatUnits, getAddress, isAddress } from 'viem';
 import { bsc } from 'viem/chains';
-import { RefreshCw, Search, ExternalLink, Layers, ChevronDown, ChevronRight, Coins } from 'lucide-react';
+import { RefreshCw, Search, ExternalLink, Layers, ChevronDown, ChevronRight, Coins, Droplets } from 'lucide-react';
 import './style.css';
 
 const robinhoodChain = {
@@ -27,7 +27,8 @@ const chains = {
   },
 } as const;
 
-const knownManagers: Record<string, { manager: string; factory: string; protocol: string }[]> = {
+// V3 Position Managers
+const v3Managers: Record<string, { manager: string; factory: string; protocol: string }[]> = {
   bsc: [
     { manager: '0x46A15B0b27311cedF172AB29E4f4766fbE7F4364', factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865', protocol: 'PancakeSwap V3' },
     { manager: '0x7b8A01B39D58278b5DE7e48c8449c9f4F5170613', factory: '0xdB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7', protocol: 'Uniswap V3' },
@@ -61,18 +62,15 @@ const tokenAbi = [
 ] as const;
 
 const factoryAbi = [{ type: 'function', name: 'getPool', stateMutability: 'view', inputs: [{ type: 'address' }, { type: 'address' }, { type: 'uint24' }], outputs: [{ type: 'address' }] }] as const;
-const poolAbi = [
-  { type: 'function', name: 'slot0', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint160' }, { type: 'int24' }, { type: 'uint16' }, { type: 'uint16' }, { type: 'uint16' }, { type: 'uint8' }, { type: 'bool' }] },
-  { type: 'function', name: 'feeGrowthGlobal0X128', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] },
-  { type: 'function', name: 'feeGrowthGlobal1X128', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint256' }] }
-] as const;
+const poolAbi = [{ type: 'function', name: 'slot0', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint160' }, { type: 'int24' }, { type: 'uint16' }, { type: 'uint16' }, { type: 'uint16' }, { type: 'uint8' }, { type: 'bool' }] }] as const;
 
 type Pos = {
+  type: 'v3';
   id: string; protocol: string; manager: string;
   token0: string; token1: string; symbol0: string; symbol1: string;
   fee: number; lower: number; upper: number; liquidity: bigint;
-  owed0: string; owed1: string; inRange: boolean | null; url: string;
-  pending0: string; pending1: string; // 实时待收手续费
+  owed0: string; owed1: string; pending0: string; pending1: string;
+  inRange: boolean | null; url: string;
 };
 
 function fmt(v: bigint, d: number) {
@@ -106,7 +104,7 @@ function App() {
     const client = createPublicClient({ chain: chains[network].chain as any, transport: http(chains[network].rpc) });
     
     const managers = new Map<string, {factory:string;protocol:string}>();
-    knownManagers[network].forEach(k => managers.set(k.manager.toLowerCase(), {factory:k.factory, protocol:k.protocol}));
+    v3Managers[network].forEach(k => managers.set(k.manager.toLowerCase(), {factory:k.factory, protocol:k.protocol}));
     
     if (apiKey.trim() && network === 'bsc') {
       try {
@@ -133,7 +131,7 @@ function App() {
         for (let i = 0n; i < count && i < 50n; i++) {
           const id = await client.readContract({ address: contract, abi: positionAbi, functionName: 'tokenOfOwnerByIndex', args: [owner, i] });
           const p = await client.readContract({ address: contract, abi: positionAbi, functionName: 'positions', args: [id] });
-          const [, , t0, t1, fee, tl, tu, liq, fg0, fg1, owed0, owed1] = p as any;
+          const [, , t0, t1, fee, tl, tu, liq, , , owed0, owed1] = p as any;
           
           const [s0, s1, d0, d1] = await Promise.all([
             client.readContract({ address: t0, abi: tokenAbi, functionName: 'symbol' }).catch(() => 'TKN'),
@@ -148,49 +146,25 @@ function App() {
           if (info.factory && liq > 0n) {
             try {
               const pool = await client.readContract({ address: getAddress(info.factory), abi: factoryAbi, functionName: 'getPool', args: [t0, t1, fee] });
-              
-              // 获取当前tick和全局feeGrowth
-              const [slot0, fg0Global, fg1Global] = await Promise.all([
-                client.readContract({ address: pool, abi: poolAbi, functionName: 'slot0' }),
-                client.readContract({ address: pool, abi: poolAbi, functionName: 'feeGrowthGlobal0X128' }),
-                client.readContract({ address: pool, abi: poolAbi, functionName: 'feeGrowthGlobal1X128' })
-              ]);
-              
+              const slot0 = await client.readContract({ address: pool, abi: poolAbi, functionName: 'slot0' });
               const tick = Number((slot0 as any)[1]);
               inRange = tick >= tl && tick < tu;
               
-              // 计算实时待收手续费(简化版:使用staticCall collect)
               try {
                 const [a0, a1] = await client.simulateContract({
-                  address: contract,
-                  abi: positionAbi,
-                  functionName: 'collect',
-                  args: [{
-                    tokenId: id,
-                    recipient: owner,
-                    amount0Max: BigInt('0xffffffffffffffffffffffffffffffff'),
-                    amount1Max: BigInt('0xffffffffffffffffffffffffffffffff')
-                  }],
+                  address: contract, abi: positionAbi, functionName: 'collect',
+                  args: [{ tokenId: id, recipient: owner, amount0Max: BigInt('0xffffffffffffffffffffffffffffffff'), amount1Max: BigInt('0xffffffffffffffffffffffffffffffff') }],
                   account: owner
                 });
-                pending0 = fmt(a0 as bigint, d0);
-                pending1 = fmt(a1 as bigint, d1);
-              } catch(e) {
-                // 如果simulate失败,使用静态owed值
-                pending0 = fmt(owed0, d0);
-                pending1 = fmt(owed1, d1);
-              }
-            } catch(e) {
-              pending0 = fmt(owed0, d0);
-              pending1 = fmt(owed1, d1);
-            }
+                pending0 = fmt(a0 as bigint, d0); pending1 = fmt(a1 as bigint, d1);
+              } catch(e) { pending0 = fmt(owed0, d0); pending1 = fmt(owed1, d1); }
+            } catch(e) { pending0 = fmt(owed0, d0); pending1 = fmt(owed1, d1); }
           } else {
-            pending0 = fmt(owed0, d0);
-            pending1 = fmt(owed1, d1);
+            pending0 = fmt(owed0, d0); pending1 = fmt(owed1, d1);
           }
           
           list.push({
-            id: id.toString(), protocol: info.protocol, manager: addr,
+            type: 'v3', id: id.toString(), protocol: info.protocol, manager: addr,
             token0: t0, token1: t1, symbol0: String(s0), symbol1: String(s1),
             fee: Number(fee), lower: Number(tl), upper: Number(tu), liquidity: liq,
             owed0: `${fmt(owed0, d0)} ${s0}`, owed1: `${fmt(owed1, d1)} ${s1}`,
@@ -202,7 +176,7 @@ function App() {
     }
     
     setRows(list);
-    setMsg(list.length ? `Found ${list.length} positions` : 'No V3 positions found');
+    setMsg(list.length ? `Found ${list.length} V3 positions` : 'No positions found');
     setBusy(false);
   }
 
